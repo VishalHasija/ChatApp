@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"log"
@@ -8,6 +9,10 @@ import (
 	"github.com/CloudyKit/jet/v6"
 	"github.com/gorilla/websocket"
 )
+
+var wsChan = make(chan WsPayload)
+
+var clients = make(map[WsConnection]string)
 
 var views = jet.NewSet(
 	jet.NewOSFileSystemLoader("./html"),
@@ -28,11 +33,22 @@ func Home(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type WsConnection struct {
+	*websocket.Conn
+}
+
 //WsJsonResponse defines the response sent back from websocket
 type WsJsonResponse struct {
 	Action      string `json:"action"`
 	Message     string `json:"messsage"`
 	MessageType string `json:"messsage_type"`
+}
+
+type WsPayload struct {
+	Action   string       `json:"action"`
+	Message  string       `json:"message"`
+	Username string       `json:"username"`
+	Conn     WsConnection `json:"-"`
 }
 
 //WsEndpoint upgrades connection to websocket.
@@ -46,9 +62,54 @@ func WsEndpoint(rw http.ResponseWriter, r *http.Request) {
 
 	var response WsJsonResponse
 	response.Message = `<em><small>Connected to server</small></em>`
+	conn := WsConnection{Conn: ws}
+	clients[conn] = ""
+
 	err = ws.WriteJSON(response)
 	if err != nil {
 		log.Println("Error parsing and sending json response : ", err)
+	}
+
+	go ListenForWs(&conn)
+}
+
+func ListenForWs(conn *WsConnection) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("Error", fmt.Sprintf("%v", r))
+		}
+	}()
+
+	var payload WsPayload
+
+	err := conn.ReadJSON(&payload)
+	if err != nil {
+		//do nothing, there is no payload.
+	} else {
+		payload.Conn = *conn
+		wsChan <- payload
+	}
+}
+
+func ListenToWsChannel() {
+	var response WsJsonResponse
+	for {
+		e := <-wsChan
+		response.Action = "Got here"
+		response.Message = fmt.Sprintf("Some message, action was %s", e.Action)
+		broadcastToAll(response)
+	}
+}
+
+func broadcastToAll(response WsJsonResponse) {
+	for client := range clients {
+		err := client.WriteJSON(response)
+		if err != nil {
+			log.Println("Websocket Error : ", err)
+			_ = client.Close()
+			delete(clients, client)
+		}
+
 	}
 }
 
